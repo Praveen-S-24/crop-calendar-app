@@ -2,84 +2,101 @@ import streamlit as st
 import rasterio
 import folium
 from streamlit_folium import st_folium
+import os
+import numpy as np
+from pyproj import Transformer
 
-# Soil file mapping
-SOIL_FILES = {
-    "floamy.asc": "Loamy",
-    "fsandy.asc": "Sandy",
-    "fclayey.asc": "Clayey",
-    "fclayskeletal.asc": "Clay Skeletal"
+st.set_page_config(layout="wide")
+st.title("🌱 Crop Calendar with NDVI + Soil Info")
+st.write("Click on the map to get NDVI, Soil Type, and Yield Potential.")
+
+# -------------------------------
+# Paths to raster datasets
+# -------------------------------
+base_path = os.path.dirname(__file__)
+
+# NDVI raster (tif)
+ndvi_file = "ocm2_ndvi_filt_16to30_jun2021_v01_01.tif"
+ndvi_path = os.path.join(base_path, ndvi_file)
+if not os.path.exists(ndvi_path):
+    st.error(f"NDVI file missing: {ndvi_file}")
+else:
+    ndvi_ds = rasterio.open(ndvi_path)
+
+# Soil layers (ASC files from Bhuvan)
+soil_files = {
+    "Sandy": "fsandy.asc",
+    "Loamy": "floamy.asc",
+    "Clayey": "fclayey.asc",
+    "Clay Skeletal": "fclayskeletal.asc"
 }
 
-# --- Function to get NDVI value ---
-def get_ndvi(lat, lon, ndvi_path="ocm2_ndvi_filt_16to30_jun2021_v01_01.tif"):
-    try:
-        with rasterio.open(ndvi_path) as src:
-            row, col = src.index(lon, lat)
-            val = src.read(1)[row, col]
-
-            if val == src.nodata:
-                return None
-
-            # Scale NDVI if in raw format
-            if val > 1:
-                val = val / 10000.0
-
-            # Clamp between 0–1
-            val = max(0, min(1, val))
-            return val
-    except Exception:
-        return None
-
-# --- Function to classify NDVI ---
-def classify_growth_stage(ndvi):
-    if ndvi is None:
-        return "No Data", "⚪"
-    elif ndvi < 0.3:
-        return "Bare / Early Sowing", "🌱"
-    elif ndvi < 0.6:
-        return "Active Growth", "🌿"
+soil_layers = {}
+for name, filename in soil_files.items():
+    path = os.path.join(base_path, filename)
+    if not os.path.exists(path):
+        st.error(f"Missing soil file: {filename}")
     else:
-        return "Healthy / Maturity", "🌾"
+        soil_layers[name] = rasterio.open(path).read(1)
 
-# --- Function to get soil type ---
-def get_soil_type(lat, lon):
-    for fpath, label in SOIL_FILES.items():
-        try:
-            with rasterio.open(fpath) as src:
-                row, col = src.index(lon, lat)
-                val = src.read(1)[row, col]
-                if val != src.nodata:
-                    return label
-        except Exception:
-            continue
-    return "Unknown"
+# -------------------------------
+# Map for pinning location
+# -------------------------------
+m = folium.Map(location=[22.0, 80.0], zoom_start=5)
+m.add_child(folium.LatLngPopup())
+map_data = st_folium(m, width=700, height=500)
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="Crop Growth App", layout="wide")
-st.title("🌍 Crop Growth & Soil Detection App")
+# -------------------------------
+# When user clicks on map
+# -------------------------------
+if map_data and map_data.get("last_clicked"):
+    lat = map_data["last_clicked"]["lat"]
+    lon = map_data["last_clicked"]["lng"]
+    st.write(f"📍 Selected Location: Latitude {lat:.4f}, Longitude {lon:.4f}")
 
-# Map setup
-m = folium.Map(location=[20, 78], zoom_start=5)
-st_map = st_folium(m, height=500, width=700)
+    try:
+        # Convert lat/lon to raster CRS
+        if ndvi_ds.crs.to_string() != "EPSG:4326":
+            transformer = Transformer.from_crs("EPSG:4326", ndvi_ds.crs, always_xy=True)
+            x, y = transformer.transform(lon, lat)
+            row, col = ndvi_ds.index(x, y)
+        else:
+            row, col = ndvi_ds.index(lon, lat)
 
-if st_map and st_map.get("last_clicked"):
-    lat, lon = st_map["last_clicked"]["lat"], st_map["last_clicked"]["lng"]
+        # NDVI value
+        ndvi_val = ndvi_ds.read(1)[row, col]
 
-    # Get NDVI
-    ndvi = get_ndvi(lat, lon)
-    growth_stage, emoji = classify_growth_stage(ndvi)
+        # -------------------------------
+        # Extract soil type (dominant layer)
+        # -------------------------------
+        soil_vals = {name: layer[row, col] for name, layer in soil_layers.items()}
+        soil_type = max(soil_vals, key=soil_vals.get)
 
-    # Get Soil
-    soil = get_soil_type(lat, lon)
+        st.write(f"🌿 NDVI: {ndvi_val:.3f}")
+        st.write(f"🪨 Soil Type: {soil_type}")
 
-    # Show results
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("📌 Results")
-        st.markdown(f"**NDVI:** {ndvi if ndvi is not None else 'No Data'}")
-        st.markdown(f"**Growth Stage:** {emoji} {growth_stage}")
-    with col2:
-        st.subheader("🌱 Soil Info")
-        st.markdown(f"**Soil Type:** {soil}")
-        st.markdown(f"**Location:** {lat:.4f}, {lon:.4f}")
+        # -------------------------------
+        # Yield / Growth Stage Estimation
+        # -------------------------------
+        if ndvi_val < 0.2:
+            stage = "Bare / Early sowing"
+            yield_potential = "Very Low" if soil_type == "Sandy" else "Low"
+
+        elif 0.2 <= ndvi_val < 0.5:
+            stage = "Active Growth"
+            if soil_type == "Sandy":
+                yield_potential = "Low to Medium"
+            elif soil_type == "Loamy":
+                yield_potential = "Medium"
+            else:
+                yield_potential = "Medium to High"
+
+        else:
+            stage = "Healthy / Maturity"
+            yield_potential = "Medium" if soil_type == "Sandy" else "High"
+
+        st.success(f"🌱 Growth Stage: {stage}")
+        st.subheader(f"🌾 Yield Potential: {yield_potential}")
+
+    except Exception as e:
+        st.error(f"Error reading raster: {e}")
