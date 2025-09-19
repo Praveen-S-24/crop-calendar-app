@@ -7,7 +7,7 @@ from pyproj import Transformer
 import numpy as np
 
 # -------------------------------
-# Page config & title
+# Page config
 # -------------------------------
 st.set_page_config(layout="wide", page_title="🌱 Crop Calendar", page_icon="🌾")
 st.markdown(
@@ -31,22 +31,25 @@ if not os.path.exists(ndvi_path):
     st.error(f"❌ NDVI file missing: {ndvi_file}")
 else:
     ndvi_ds = rasterio.open(ndvi_path)
+    ndvi_nodata = ndvi_ds.nodata
 
-# Soil type rasters
+# Soil rasters
 soil_files = {
     "Sandy": "fsandy.asc",
     "Loamy": "floamy.asc",
     "Clayey": "fclayey.asc",
     "Clay Skeletal": "fclayskeletal.asc"
 }
-
 soil_layers = {}
-for name, filename in soil_files.items():
-    path = os.path.join(base_path, filename)
+soil_nodata = {}
+for name, fname in soil_files.items():
+    path = os.path.join(base_path, fname)
     if not os.path.exists(path):
-        st.error(f"❌ Missing soil file: {filename}")
+        st.error(f"❌ Missing soil file: {fname}")
     else:
-        soil_layers[name] = rasterio.open(path)
+        ds = rasterio.open(path)
+        soil_layers[name] = ds
+        soil_nodata[name] = ds.nodata
 
 # Soil depth rasters
 depth_files = {
@@ -55,14 +58,16 @@ depth_files = {
     "50-75 cm": "fsoildep50_75.asc",
     "75-100 cm": "fsoildep75_100.asc"
 }
-
 depth_layers = {}
-for name, filename in depth_files.items():
-    path = os.path.join(base_path, filename)
+depth_nodata = {}
+for name, fname in depth_files.items():
+    path = os.path.join(base_path, fname)
     if not os.path.exists(path):
-        st.error(f"❌ Missing depth file: {filename}")
+        st.error(f"❌ Missing depth file: {fname}")
     else:
-        depth_layers[name] = rasterio.open(path)
+        ds = rasterio.open(path)
+        depth_layers[name] = ds
+        depth_nodata[name] = ds.nodata
 
 # -------------------------------
 # Map
@@ -73,11 +78,11 @@ m.add_child(folium.LatLngPopup())
 map_data = st_folium(m, width=700, height=500)
 
 # -------------------------------
-# Functions
+# Function to read raster value at lat/lon
 # -------------------------------
-def get_raster_value(ds, lon, lat):
-    """Get raster value with nearest-pixel fallback"""
+def get_raster_value(ds, lon, lat, nodata=None):
     try:
+        # Transform coordinates if CRS is different
         if ds.crs and ds.crs.to_string() != "EPSG:4326":
             transformer = Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
             x, y = transformer.transform(lon, lat)
@@ -87,19 +92,17 @@ def get_raster_value(ds, lon, lat):
         row, col = ds.index(x, y)
         arr = ds.read(1)
         h, w = arr.shape
-
         if 0 <= row < h and 0 <= col < w:
             val = arr[row, col]
-            # Treat NoData as 0
-            if val in ds.nodata or val is None:
-                return 0
+            if nodata is not None and val == nodata:
+                return np.nan
             return val
-        return 0
+        return np.nan
     except:
-        return 0
+        return np.nan
 
 # -------------------------------
-# When user clicks
+# Process click
 # -------------------------------
 if map_data and map_data.get("last_clicked"):
     lat = map_data["last_clicked"]["lat"]
@@ -108,19 +111,32 @@ if map_data and map_data.get("last_clicked"):
 
     try:
         # NDVI
-        ndvi_val = get_raster_value(ndvi_ds, lon, lat)
+        ndvi_val = get_raster_value(ndvi_ds, lon, lat, ndvi_nodata)
+        if np.isnan(ndvi_val):
+            ndvi_val = 0
+        # Scale NDVI if >1 (Bhuvan often uses 0–100 scale)
+        if ndvi_val > 1:
+            ndvi_val = ndvi_val / 100.0
 
         # Soil type
-        soil_vals = {name: get_raster_value(ds, lon, lat) for name, ds in soil_layers.items()}
-        soil_type = max(soil_vals, key=soil_vals.get)
-        soil_score = soil_vals[soil_type]
+        soil_vals = {name: get_raster_value(ds, lon, lat, soil_nodata[name]) for name, ds in soil_layers.items()}
+        if all(np.isnan(v) for v in soil_vals.values()):
+            soil_type = "Unknown"
+            soil_score = 0
+        else:
+            soil_type = max(soil_vals, key=lambda k: 0 if np.isnan(soil_vals[k]) else soil_vals[k])
+            soil_score = 0 if np.isnan(soil_vals[soil_type]) else soil_vals[soil_type]
 
-        # Soil depth (pick max depth)
-        depth_vals = {name: get_raster_value(ds, lon, lat) for name, ds in depth_layers.items()}
-        depth_layer = max(depth_vals, key=depth_vals.get)
-        depth_val = depth_vals[depth_layer]
+        # Soil depth
+        depth_vals = {name: get_raster_value(ds, lon, lat, depth_nodata[name]) for name, ds in depth_layers.items()}
+        if all(np.isnan(v) for v in depth_vals.values()):
+            depth_layer = "Unknown"
+            depth_val = 0
+        else:
+            depth_layer = max(depth_vals, key=lambda k: 0 if np.isnan(depth_vals[k]) else depth_vals[k])
+            depth_val = 0 if np.isnan(depth_vals[depth_layer]) else depth_vals[depth_layer]
 
-        # Growth stage & yield potential
+        # Growth stage & yield
         if ndvi_val < 0.2:
             stage = "Bare / Early sowing 🌱"
             ndvi_color = "🔴"
@@ -139,7 +155,7 @@ if map_data and map_data.get("last_clicked"):
             ndvi_color = "🟢"
             yield_potential = "Medium 🟡" if soil_type == "Sandy" else "High 🟢"
 
-        # Display nicely
+        # Display
         st.markdown(
             f"""
             <div style="
