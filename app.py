@@ -64,11 +64,11 @@ def get_raster_value(raster_path, lon, lat):
                 return val
             else:
                 return None
-    except Exception as e:
+    except Exception:
         return None
 
 # -------------------------------
-# Map
+# Interactive map
 # -------------------------------
 m = folium.Map(location=[22.0, 80.0], zoom_start=5)
 m.add_child(folium.LatLngPopup())
@@ -82,29 +82,31 @@ if map_data and map_data.get("last_clicked"):
     lon = map_data["last_clicked"]["lng"]
     st.write(f"📍 Selected Location: Latitude {lat:.4f}, Longitude {lon:.4f}")
 
-    # NDVI
+    # --- NDVI ---
     ndvi_val = get_raster_value(ndvi_path, lon, lat)
+    if ndvi_val is not None and ndvi_val > 2:  # likely scaled
+        ndvi_val = ndvi_val / 100  # adjust if dataset is scaled
 
-    # Soil textures
+    # --- Soil textures ---
     soil_vals = {name: get_raster_value(os.path.join(base_path, f), lon, lat)
                  for name, f in soil_files.items()}
-    # Filter None and zero
-    soil_vals = {k: v for k, v in soil_vals.items() if v is not None and v > 0}
+    # Filter None values
+    soil_vals = {k: v for k, v in soil_vals.items() if v is not None}
     soil_type = max(soil_vals, key=soil_vals.get) if soil_vals else "Unknown"
 
-    # Soil depth
+    # --- Soil depth ---
     depth_vals = {name: get_raster_value(os.path.join(base_path, f), lon, lat)
                   for name, f in depth_files.items()}
-    depth_vals = {k: v for k, v in depth_vals.items() if v is not None and v > 0}
+    depth_vals = {k: v for k, v in depth_vals.items() if v is not None}
     soil_depth = max(depth_vals, key=depth_vals.get) if depth_vals else "Unknown"
 
-    # Display
+    # --- Display values ---
     st.write(f"🌿 NDVI: {ndvi_val:.3f}" if ndvi_val is not None else "NDVI: Unknown")
     st.write(f"🪨 Soil Type: {soil_type}")
     st.write(f"📏 Soil Depth Layer: {soil_depth} cm")
 
-    # Growth stage & yield
-    if ndvi_val is None:
+    # --- Growth stage & yield ---
+    if ndvi_val is None or soil_type == "Unknown":
         stage = "Unknown"
         yield_potential = "Unknown"
     elif ndvi_val < 0.2:
