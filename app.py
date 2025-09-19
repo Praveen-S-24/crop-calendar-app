@@ -3,7 +3,6 @@ import rasterio
 import folium
 from streamlit_folium import st_folium
 import os
-import numpy as np
 from pyproj import Transformer
 
 st.set_page_config(layout="wide")
@@ -27,7 +26,6 @@ soil_files = {
     "Clayey": "fclayey.asc",
     "Clay Skeletal": "fclayskeletal.asc"
 }
-soil_layers = {name: rasterio.open(os.path.join(base_path, f)).read(1) for name, f in soil_files.items()}
 
 # Soil depth layers (cm)
 depth_files = {
@@ -36,10 +34,29 @@ depth_files = {
     "50-75": "fsoildep50_75.asc",
     "75-100": "fsoildep75_100.asc"
 }
-depth_layers = {name: rasterio.open(os.path.join(base_path, f)).read(1) for name, f in depth_files.items()}
 
 # -------------------------------
-# Map for pinning location
+# Helper function to safely get raster value
+# -------------------------------
+def get_raster_value(raster_path, lon, lat):
+    """Return raster value at given lat/lon, or None if out of bounds"""
+    with rasterio.open(raster_path) as ds:
+        # Transform coordinates if raster CRS is not EPSG:4326
+        if ds.crs.to_string() != "EPSG:4326":
+            transformer = Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
+            x, y = transformer.transform(lon, lat)
+            row, col = ds.index(x, y)
+        else:
+            row, col = ds.index(lon, lat)
+        
+        array = ds.read(1)
+        if 0 <= row < array.shape[0] and 0 <= col < array.shape[1]:
+            return array[row, col]
+        else:
+            return None
+
+# -------------------------------
+# Interactive map
 # -------------------------------
 m = folium.Map(location=[22.0, 80.0], zoom_start=5)
 m.add_child(folium.LatLngPopup())
@@ -54,36 +71,34 @@ if map_data and map_data.get("last_clicked"):
     st.write(f"📍 Selected Location: Latitude {lat:.4f}, Longitude {lon:.4f}")
 
     try:
-        # Convert lat/lon → raster CRS
-        if ndvi_ds.crs.to_string() != "EPSG:4326":
-            transformer = Transformer.from_crs("EPSG:4326", ndvi_ds.crs, always_xy=True)
-            x, y = transformer.transform(lon, lat)
-            row, col = ndvi_ds.index(x, y)
-        else:
-            row, col = ndvi_ds.index(lon, lat)
+        # Get NDVI
+        ndvi_val = get_raster_value(ndvi_path, lon, lat)
 
-        # NDVI value
-        ndvi_val = ndvi_ds.read(1)[row, col]
+        # Get soil textures
+        soil_vals = {name: get_raster_value(os.path.join(base_path, f), lon, lat)
+                     for name, f in soil_files.items()}
+        # Handle missing values
+        soil_vals = {k:v for k,v in soil_vals.items() if v is not None}
+        soil_type = max(soil_vals, key=soil_vals.get) if soil_vals else "Unknown"
 
-        # Soil type
-        soil_vals = {name: layer[row, col] for name, layer in soil_layers.items()}
-        soil_type = max(soil_vals, key=soil_vals.get)
+        # Get soil depth
+        depth_vals = {name: get_raster_value(os.path.join(base_path, f), lon, lat)
+                      for name, f in depth_files.items()}
+        depth_vals = {k:v for k,v in depth_vals.items() if v is not None}
+        soil_depth = max(depth_vals, key=depth_vals.get) if depth_vals else "Unknown"
 
-        # Soil depth
-        depth_vals = {name: layer[row, col] for name, layer in depth_layers.items()}
-        # Pick the depth layer with max value (assuming numeric)
-        soil_depth = max(depth_vals, key=depth_vals.get)
-
-        # Display results
-        st.write(f"🌿 NDVI: {ndvi_val:.3f}")
+        # Show extracted values
+        st.write(f"🌿 NDVI: {ndvi_val:.3f}" if ndvi_val is not None else "NDVI: Unknown")
         st.write(f"🪨 Soil Type: {soil_type}")
         st.write(f"📏 Soil Depth Layer: {soil_depth} cm")
 
         # Yield / Growth Stage Estimation
-        if ndvi_val < 0.2:
+        if ndvi_val is None:
+            stage = "Unknown"
+            yield_potential = "Unknown"
+        elif ndvi_val < 0.2:
             stage = "Bare / Early sowing"
             yield_potential = "Very Low" if soil_type == "Sandy" else "Low"
-
         elif 0.2 <= ndvi_val < 0.5:
             stage = "Active Growth"
             if soil_type == "Sandy":
