@@ -1,158 +1,99 @@
 import streamlit as st
-import rasterio
 import folium
 from streamlit_folium import st_folium
-import os
-from pyproj import Transformer
+import rasterio
+from rasterio.plot import show
 import numpy as np
 
-# -------------------------------
-# Streamlit setup
-# -------------------------------
-st.set_page_config(layout="wide", page_title="🌱 Crop Calendar", page_icon="🌾")
-st.markdown("<h1 style='text-align:center; color:green;'>🌱 Crop Calendar with NDVI & Soil Info</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center; color:gray;'>Click on the map to get NDVI, Soil Type, and Yield Potential.</p>", unsafe_allow_html=True)
-
-# -------------------------------
-# Paths to raster datasets
-# -------------------------------
-base_path = os.path.dirname(__file__)
-
-# NDVI raster
-ndvi_file = "ocm2_ndvi_filt_16to30_jun2021_v01_01.tif"
-ndvi_path = os.path.join(base_path, "data", ndvi_file)
-if not os.path.exists(ndvi_path):
-    st.error(f"❌ NDVI file missing: {ndvi_file}")
-    ndvi_ds = None
-else:
-    ndvi_ds = rasterio.open(ndvi_path)
-
-# Soil layers (ASC files)
-soil_files = {
-    "Sandy": "fsandy.asc",
-    "Loamy": "floamy.asc",
-    "Clayey": "fclayey.asc",
-    "Clay Skeletal": "fclayskeletal.asc"
-}
-soil_layers = {}
-for name, filename in soil_files.items():
-    path = os.path.join(base_path, "data", filename)
-    if not os.path.exists(path):
-        st.error(f"❌ Missing soil file: {filename}")
-    else:
-        soil_layers[name] = rasterio.open(path)
-
-# Depth layers (ASC files)
-depth_files = {
-    "0-25 cm": "fsoildep0_25.asc",
-    "25-50 cm": "fsoildep25_50.asc",
-    "50-75 cm": "fsoildep50_75.asc",
-    "75-100 cm": "fsoildep75_100.asc"
-}
-depth_layers = {}
-for name, filename in depth_files.items():
-    path = os.path.join(base_path, "data", filename)
-    if not os.path.exists(path):
-        st.error(f"❌ Missing depth file: {filename}")
-    else:
-        depth_layers[name] = rasterio.open(path)
-
-# -------------------------------
-# Helper function to get raster value
-# -------------------------------
-def get_value(ds, lon, lat):
+# ------------------------------
+# Utility: Read raster value
+# ------------------------------
+def get_raster_value(raster_path, lat, lon):
     try:
-        if ds.crs.to_string() != "EPSG:4326":
-            transformer = Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
-            x, y = transformer.transform(lon, lat)
-        else:
-            x, y = lon, lat
-        row, col = ds.index(x, y)
-        arr = ds.read(1)
-        if 0 <= row < arr.shape[0] and 0 <= col < arr.shape[1]:
-            val = arr[row, col]
-            if val == ds.nodata:
+        with rasterio.open(raster_path) as src:
+            row, col = src.index(lon, lat)  # lon, lat order!
+            value = src.read(1)[row, col]
+            if value == src.nodata:
                 return None
-            return val
-        return None
-    except Exception as e:
+            return float(value)
+    except Exception:
         return None
 
-# -------------------------------
-# Map for selecting location
-# -------------------------------
-st.markdown("### 🌍 Select a Location")
-m = folium.Map(location=[22.0, 80.0], zoom_start=5)
-m.add_child(folium.LatLngPopup())
+# ------------------------------
+# Load raster files (replace with your files in /data/)
+# ------------------------------
+soil_rasters = {
+    "Sandy": "data/soil_sandy.tif",
+    "Loamy": "data/soil_loamy.tif",
+    "Clayey": "data/soil_clayey.tif",
+    "Clay Skeletal": "data/soil_clay_skeletal.tif"
+}
+
+depth_rasters = {
+    "0-25 cm": "data/depth_0_25.tif",
+    "25-50 cm": "data/depth_25_50.tif",
+    "50-75 cm": "data/depth_50_75.tif",
+    "75-100 cm": "data/depth_75_100.tif"
+}
+
+# ------------------------------
+# Streamlit UI
+# ------------------------------
+st.set_page_config(page_title="Crop Calendar App", layout="wide")
+st.title("🌾 Crop Calendar App (NDVI + Soil + Depth)")
+
+st.write("Select a location on the map to get NDVI, Soil, and Depth info.")
+
+# Folium map
+m = folium.Map(location=[20.5937, 78.9629], zoom_start=5)
 map_data = st_folium(m, width=700, height=500)
 
-# -------------------------------
-# When user clicks on map
-# -------------------------------
-if map_data and map_data.get("last_clicked"):
+if map_data["last_clicked"] is not None:
     lat = map_data["last_clicked"]["lat"]
     lon = map_data["last_clicked"]["lng"]
-    st.markdown(f"### 📍 Selected Location: Latitude {lat:.4f}, Longitude {lon:.4f}")
 
-    if ndvi_ds:
-        ndvi_val = get_value(ndvi_ds, lon, lat)
-    else:
-        ndvi_val = None
+    st.subheader(f"📍 Selected Location: Latitude {lat:.4f}, Longitude {lon:.4f}")
 
-    # -------------------------------
-    # Debug Soil Layers
-    # -------------------------------
-    soil_type = "Unknown"
-    for name, ds in soil_layers.items():
-        val = get_value(ds, lon, lat)
-        st.write(f"DEBUG Soil {name}: {val}")  # 👈 Debug print
-        if val is not None and val > 0:
-            soil_type = name
-            break
+    # ------------------------------
+    # Soil data
+    # ------------------------------
+    soil_scores = {}
+    for soil_type, path in soil_rasters.items():
+        val = get_raster_value(path, lat, lon)
+        soil_scores[soil_type] = val
 
-    # -------------------------------
-    # Debug Depth Layers
-    # -------------------------------
-    depth_layer = "Unknown"
-    for name, ds in depth_layers.items():
-        val = get_value(ds, lon, lat)
-        st.write(f"DEBUG Depth {name}: {val}")  # 👈 Debug print
-        if val is not None and val > 0:
-            depth_layer = name
-            break
+    best_soil = max(soil_scores, key=lambda x: soil_scores[x] if soil_scores[x] is not None else -1)
+    st.write(f"🪨 Soil Type: {best_soil} (Score: {soil_scores[best_soil]})")
 
-    # -------------------------------
-    # Growth Stage & Yield Potential
-    # -------------------------------
-    if ndvi_val is None:
-        stage = "Unknown"
-        yield_potential = "Unknown"
-    elif ndvi_val < 0.2:
+    # ------------------------------
+    # Depth data
+    # ------------------------------
+    depth_scores = {}
+    for depth, path in depth_rasters.items():
+        val = get_raster_value(path, lat, lon)
+        depth_scores[depth] = val
+
+    best_depth = max(depth_scores, key=lambda x: depth_scores[x] if depth_scores[x] is not None else -1)
+    st.write(f"📏 Soil Depth Layer: {best_depth} ({depth_scores[best_depth]})")
+
+    # ------------------------------
+    # Placeholder NDVI
+    # ------------------------------
+    ndvi_value = np.random.uniform(0, 1)  # later replace with real NDVI
+    st.write(f"🌿 NDVI: {ndvi_value:.3f}")
+
+    # ------------------------------
+    # Growth Stage Logic
+    # ------------------------------
+    if ndvi_value < 0.2:
         stage = "Bare / Early sowing 🌱"
-        yield_potential = "Very Low 🔴" if soil_type == "Sandy" else "Low 🟠"
-    elif 0.2 <= ndvi_val < 0.5:
-        stage = "Active Growth 🌿"
-        if soil_type == "Sandy":
-            yield_potential = "Low to Medium 🟠"
-        elif soil_type == "Loamy":
-            yield_potential = "Medium 🟡"
-        else:
-            yield_potential = "Medium to High 🟢"
+        yield_status = "Very Low 🔴"
+    elif ndvi_value < 0.5:
+        stage = "Vegetative 🌿"
+        yield_status = "Medium 🟡"
     else:
-        stage = "Healthy / Maturity 🌾"
-        yield_potential = "Medium 🟡" if soil_type == "Sandy" else "High 🟢"
+        stage = "Reproductive 🌾"
+        yield_status = "High 🟢"
 
-    # -------------------------------
-    # Display results
-    # -------------------------------
-    st.markdown(
-        f"""
-        <div style="background-color:#f0fff0; padding:20px; border-radius:15px; border: 2px solid #90ee90;">
-        <h3>🌿 NDVI: {ndvi_val if ndvi_val is not None else "Unknown"}</h3>
-        <h3>🪨 Soil Type: {soil_type}</h3>
-        <h3>📏 Soil Depth Layer: {depth_layer}</h3>
-        <h3>🌱 Growth Stage: {stage}</h3>
-        <h3>🌾 Yield Potential: {yield_potential}</h3>
-        </div>
-        """, unsafe_allow_html=True
-    )
+    st.write(f"🌱 Growth Stage: {stage}")
+    st.write(f"🌾 Yield Potential: {yield_status}")
